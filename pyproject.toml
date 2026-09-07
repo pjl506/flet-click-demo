@@ -1,0 +1,12 @@
+[project]
+name = "flet-click-demo"
+version = "1.0.0"
+description = "Flet 点击计数 & 换色 Demo"
+
+[tool.flet]
+org = "com.example"
+product = "FletDemo"
+
+[tool.flet.app]
+path = "app"
+module = "main"

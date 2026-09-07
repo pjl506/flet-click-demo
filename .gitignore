@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Flet local build output (CI builds in the cloud)
+build/
+
+# Flet cache
+.flet/
+
+# IDE
+.vscode/
+.idea/
