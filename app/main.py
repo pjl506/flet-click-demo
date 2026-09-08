@@ -127,7 +127,7 @@ def main(page: ft.Page):
 
     counter_section = ft.Column(
         [
-            ft.Text("点击按钮：计数 +1，同时切换页面背景色", size=13, color=ft.Colors.GREY_700),
+            ft.Text("点击按钮：计数 +1，同时切换页面背景色", size=13, color=ft.Colors.BLACK),
             count_text,
             ft.Button("点击我 +1", on_click=on_click),
         ],
@@ -150,7 +150,7 @@ def main(page: ft.Page):
     subscribed = set()           # 客户端认为已订阅的主题
 
     url_field = ft.TextField(value=cfg["url"], width=380, label="服务地址", text_size=13)
-    conn_status = ft.Text("未连接", size=14, weight=ft.FontWeight.BOLD, color=ft.Colors.GREY_700)
+    conn_status = ft.Text("未连接", size=14, weight=ft.FontWeight.BOLD, color=ft.Colors.BLACK)
     auto_reconnect_sw = ft.Switch(label="自动重连", value=cfg["auto_reconnect"], scale=0.85)
     auto_subscribe_sw = ft.Switch(label="连接后自动重订所有主题", value=cfg["auto_subscribe"], scale=0.85)
 
@@ -231,22 +231,22 @@ def main(page: ft.Page):
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
             except Exception as err:
-                append_msg(f"配置保存失败：{err}", ft.Colors.RED_700)
+                append_msg(f"配置保存失败：{err}", ft.Colors.BLACK)
 
     # ---- 发送帧（模板渲染） ----
     def send_frame(kind: str, topic: str, message: str = None) -> bool:
         ws = state["ws"]
         if ws is None:
-            set_status("未连接，请先连接服务器", ft.Colors.RED_700)
+            set_status("未连接，请先连接服务器", ft.Colors.BLACK)
             return False
         frame = render_frame(cfg["templates"][kind], topic, message)
         try:
             ws.send(frame)
-            append_msg(f"→ {frame}", ft.Colors.PURPLE_700,
+            append_msg(f"→ {frame}", ft.Colors.BLACK,
                        topic=topic if kind == "publish" else None)
             return True
         except Exception as err:
-            append_msg(f"发送失败：{err}", ft.Colors.RED_700)
+            append_msg(f"发送失败：{err}", ft.Colors.BLACK)
             return False
 
     # ---- WebSocketApp 回调（运行在 ws 接收线程） ----
@@ -254,8 +254,8 @@ def main(page: ft.Page):
     def on_open(ws):
         state["pending_open"] = False
         state["reconnect_delay"] = RECONNECT_MIN_SEC
-        set_status("已连接", ft.Colors.GREEN_700)
-        append_msg(f"已连接 {state['url']}", ft.Colors.GREEN_700, bold=True)
+        set_status("已连接", ft.Colors.BLACK)
+        append_msg(f"已连接 {state['url']}", ft.Colors.BLACK, bold=True)
         subscribed.clear()
         if auto_subscribe_sw.value:
             for t in list(cfg["topics"]):
@@ -277,7 +277,7 @@ def main(page: ft.Page):
         append_msg(str(raw))
 
     def on_error(ws, err):
-        append_msg(f"连接错误：{err}", ft.Colors.RED_700)
+        append_msg(f"连接错误：{err}", ft.Colors.BLACK)
 
     def on_close(ws, code, reason):
         state["ws"] = None
@@ -285,11 +285,11 @@ def main(page: ft.Page):
         subscribed.clear()
         render_topics()
         if state["user_close"]:
-            set_status("已主动断开", ft.Colors.GREY_700)
-            append_msg(f"已主动断开（code={code}）", ft.Colors.GREY_700)
+            set_status("已主动断开", ft.Colors.BLACK)
+            append_msg(f"已主动断开（code={code}）", ft.Colors.BLACK)
         else:
-            set_status("连接异常断开", ft.Colors.RED_700)
-            append_msg(f"连接异常断开（code={code}），将自动重连", ft.Colors.RED_700)
+            set_status("连接异常断开", ft.Colors.BLACK)
+            append_msg(f"连接异常断开（code={code}），将自动重连", ft.Colors.BLACK)
             schedule_reconnect()
 
     def schedule_reconnect():
@@ -298,7 +298,7 @@ def main(page: ft.Page):
             return
         delay = state["reconnect_delay"]
         state["reconnect_delay"] = min(delay * 2, RECONNECT_MAX_SEC)
-        append_msg(f"{delay}s 后自动重连 {state['url']} …", ft.Colors.AMBER_800)
+        append_msg(f"{delay}s 后自动重连 {state['url']} …", ft.Colors.BLACK)
         t = threading.Timer(delay, do_connect)
         t.daemon = True
         state["reconnect_timer"] = t
@@ -315,7 +315,7 @@ def main(page: ft.Page):
         state["user_close"] = False
         url = to_ws_url(url_field.value)
         if not url:
-            set_status("请先填写服务地址", ft.Colors.RED_700)
+            set_status("请先填写服务地址", ft.Colors.BLACK)
             return
         rt = state["reconnect_timer"]
         if rt is not None:
@@ -331,7 +331,7 @@ def main(page: ft.Page):
             state["ws"] = None
         state["url"] = url
         url_field.value = url
-        set_status("连接中…", ft.Colors.AMBER_800)
+        set_status("连接中…", ft.Colors.BLACK)
         page.update()
         ws = websocket.WebSocketApp(
             url,
@@ -352,7 +352,7 @@ def main(page: ft.Page):
         # 看门狗：超时未完成握手则强制关闭，交给 on_close 重连逻辑
         def watchdog():
             if state["pending_open"]:
-                append_msg(f"连接超时（>{CONNECT_TIMEOUT_SEC}s），尝试中断", ft.Colors.RED_700)
+                append_msg(f"连接超时（>{CONNECT_TIMEOUT_SEC}s），尝试中断", ft.Colors.BLACK)
                 try:
                     ws.close()
                 except Exception:
@@ -396,7 +396,7 @@ def main(page: ft.Page):
                             ft.Text(
                                 "已订阅" if is_sub else "未订阅",
                                 size=11,
-                                color=ft.Colors.GREEN_700 if is_sub else ft.Colors.GREY_600,
+                                color=ft.Colors.BLACK if is_sub else ft.Colors.BLACK,
                             ),
                             width=52,
                         ),
@@ -459,14 +459,14 @@ def main(page: ft.Page):
             if send_frame("subscribe", t):
                 subscribed.add(t)
                 ok += 1
-        append_msg(f"批量订阅完成：{ok}/{len(cfg['topics'])}", ft.Colors.BLUE_700)
+        append_msg(f"批量订阅完成：{ok}/{len(cfg['topics'])}", ft.Colors.BLACK)
         render_topics()
 
     def unsubscribe_all(e=None):
         for t in list(subscribed):
             send_frame("unsubscribe", t)
         subscribed.clear()
-        append_msg("已退订全部主题", ft.Colors.BLUE_700)
+        append_msg("已退订全部主题", ft.Colors.BLACK)
         render_topics()
 
     # ---- 发布 ----
@@ -474,10 +474,10 @@ def main(page: ft.Page):
         t = pub_topic_dd.value
         text = msg_field.value or ""
         if not t:
-            append_msg("请选择发布目标主题", ft.Colors.RED_700)
+            append_msg("请选择发布目标主题", ft.Colors.BLACK)
             return
         if not text:
-            append_msg("请填写消息内容", ft.Colors.RED_700)
+            append_msg("请填写消息内容", ft.Colors.BLACK)
             return
         send_frame("publish", t, text)
 
@@ -598,8 +598,42 @@ def main(page: ft.Page):
     )
 
     render_topics()
-    append_msg("就绪。先修改地址/协议模板，点击“连接”。", ft.Colors.GREY_700)
+    append_msg("就绪。先修改地址/协议模板，点击“连接”。", ft.Colors.BLACK)
 
+
+# Web 本地服务（no_cdn 模式）下，flet 模板把字体回退基址指到 assets/fonts/，
+# 该目录不存在 Noto Sans SC 分片，CanvasKit 拿不到中文字体导致中文全部乱码。
+# 这里对 flet_web 的 index.html 打补丁过程做一层包装，把回退基址改回
+# Google Fonts 标准基址（fonts.gstatic.com 国内可直连，分片路径由引擎内置拼出）。
+# 仅影响本地 Web 调试；APK 走 Android 系统字体，不受影响。导入失败（移动端）则跳过。
+def _patch_web_font_fallback():
+    try:
+        from flet_web.fastapi import flet_static_files as _fsf
+
+        _orig = _fsf.patch_index_html
+
+        def _with_font_fallback(index_path, **kwargs):
+            _orig(index_path, **kwargs)
+            try:
+                with open(index_path, encoding="utf-8") as f:
+                    html = f.read()
+                if "flet.fontFallbackBaseUrl" not in html and "flet.noCdn=" in html:
+                    html = html.replace(
+                        "flet.noCdn=",
+                        'flet.fontFallbackBaseUrl="https://fonts.gstatic.com/s/";\nflet.noCdn=',
+                        1,
+                    )
+                    with open(index_path, "w", encoding="utf-8") as f:
+                        f.write(html)
+            except Exception:
+                pass
+
+        _fsf.patch_index_html = _with_font_fallback
+    except Exception:
+        pass
+
+
+_patch_web_font_fallback()
 
 # 打包为 APK 时由 flet 运行时加载 main 模块并调用 main(page)；
 # 浏览器/桌面模式下 ft.run 直接启动。view/web_renderer/no_cdn 参数在移动端会被忽略。
