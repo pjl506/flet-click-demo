@@ -88,7 +88,7 @@ def main(page: ft.Page):
     msg_panel = ft.Container(
         content=msg_list,
         width=380,
-        border=ft.border.all(1, ft.Colors.GREY_400),
+        border=ft.Border.all(1, ft.Colors.GREY_400),
         border_radius=8,
         bgcolor=ft.Colors.with_opacity(0.5, ft.Colors.WHITE),
     )
