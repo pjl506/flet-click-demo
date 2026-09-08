@@ -164,7 +164,7 @@ def main(page: ft.Page):
         text_size=13,
         options=[ft.dropdown.Option("全部")],
         value="全部",
-        on_change=lambda e: apply_filter(e.control.value),
+        on_select=lambda e: apply_filter(e.control.value),
     )
 
     def apply_filter(value):
@@ -173,6 +173,7 @@ def main(page: ft.Page):
         render_messages()
 
     def refresh_filter_options():
+        nonlocal current_filter
         topics = sorted({m["topic"] for m in msg_cache if m.get("topic")} | set(cfg["topics"]))
         filter_dd.options = [ft.dropdown.Option("全部")] + [ft.dropdown.Option(t) for t in topics]
         if current_filter and current_filter not in topics:
@@ -379,9 +380,9 @@ def main(page: ft.Page):
                 ft.Row(
                     [
                         ft.Container(
-                            ft.Text(t, size=13, weight=ft.FontWeight.BOLD),
+                            ft.Text(t, size=13, weight=ft.FontWeight.BOLD,
+                                    overflow=ft.TextOverflow.ELLIPSIS),
                             width=150 if len(t) < 18 else 260,
-                            overflow=ft.TextOverflow.ELLIPSIS,
                         ),
                         ft.Container(
                             ft.Text(
@@ -490,7 +491,7 @@ def main(page: ft.Page):
 
     tpl_tile = ft.ExpansionTile(
         title=ft.Text("协议模板（{topic} / {message} 占位符，适配任意服务端）", size=13),
-        initially_expanded=False,
+        expanded=False,
         controls=[
             ft.Container(
                 ft.Column(
@@ -516,7 +517,7 @@ def main(page: ft.Page):
                 spacing=12,
             ),
             conn_status,
-            ft.Container(auto_subscribe_sw, alignment=ft.alignment.center),
+            ft.Container(auto_subscribe_sw, alignment=ft.Alignment.CENTER),
         ],
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         spacing=8,
@@ -593,5 +594,6 @@ def main(page: ft.Page):
 
 
 # 打包为 APK 时由 flet 运行时加载 main 模块并调用 main(page)；
-# 浏览器/桌面模式下 ft.run 直接启动。view 参数在移动端会被忽略。
-ft.run(main, view=ft.AppView.WEB_BROWSER)
+# 浏览器/桌面模式下 ft.run 直接启动。view/web_renderer/no_cdn 参数在移动端会被忽略。
+# web_renderer 用 CANVAS_KIT：skwasm 渲染器会直连 gstatic.com 拉取资源（国内被墙导致页面卡死）
+ft.run(main, view=ft.AppView.WEB_BROWSER, web_renderer=ft.WebRenderer.CANVAS_KIT, no_cdn=True)

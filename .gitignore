@@ -6,6 +6,10 @@ venv/
 
 # Flet local build output (CI builds in the cloud)
 build/
+apk_out/
+
+# 本地 DLP 解密辅助脚本（不入库）
+_hardlink_dart.py
 
 # Flet cache
 .flet/
