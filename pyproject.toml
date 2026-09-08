@@ -2,7 +2,7 @@
 name = "flet-click-demo"
 version = "2.0.0"
 description = "Flet 点击计数换色 + WebSocket 订阅/发布 Demo"
-dependencies = ["websocket-client>=1.6.0", "certifi"]
+dependencies = ["flet==0.86.5", "websocket-client>=1.6.0", "certifi"]
 
 [tool.flet]
 org = "com.example"
