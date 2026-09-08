@@ -1,5 +1,6 @@
 import atexit
 import json
+import mimetypes
 import os
 import threading
 import time
@@ -8,6 +9,13 @@ from pathlib import Path
 import websocket  # websocket-client
 
 import flet as ft
+
+# Windows 注册表可能把 .js/.mjs 映射为 text/plain；浏览器会拒绝用 ES module
+# 动态 import 加载 text/plain 的 canvaskit.js，导致 Web 端永远卡在启动画面。
+# 本地 ft.run 内置 web 服务器用 Python mimetypes 推断 Content-Type，这里强制纠正。
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/javascript", ".mjs")
+mimetypes.add_type("application/wasm", ".wasm")
 
 # 默认服务地址（可在界面修改，保存后持久化）
 DEFAULT_URL = "ws://192.168.2.101:12347/ws"
