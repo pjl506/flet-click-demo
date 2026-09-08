@@ -1,12 +1,29 @@
+import atexit
 import json
+import os
 import threading
+import time
+from pathlib import Path
 
 import websocket  # websocket-client
 
 import flet as ft
 
-# WebSocket 服务默认地址（http/https 会自动转为 ws/wss）
-DEFAULT_WS_URL = "wss://4526436.r40.cpolar.top"
+# 默认服务地址（可在界面修改，保存后持久化）
+DEFAULT_URL = "ws://192.168.2.101:12347/ws"
+
+# 协议模板：{topic}/{message} 占位符，适配任意服务端协议（MQTT/STOMP/自定义）
+DEFAULT_TEMPLATES = {
+    "subscribe": '{"action":"subscribe","topic":"{topic}"}',
+    "unsubscribe": '{"action":"unsubscribe","topic":"{topic}"}',
+    "publish": '{"action":"publish","topic":"{topic}","message":"{message}"}',
+}
+
+# 消息缓存上限与看门狗参数
+MAX_MESSAGES = 500
+CONNECT_TIMEOUT_SEC = 12
+RECONNECT_MIN_SEC = 2
+RECONNECT_MAX_SEC = 30
 
 # 每次点击循环切换的页面背景色
 BG_COLORS = [
@@ -17,8 +34,49 @@ BG_COLORS = [
     ft.Colors.PINK_100,
 ]
 
-# 消息列表最多保留条数
-MAX_MESSAGES = 200
+
+# ---------------- 配置持久化（config.json） ----------------
+
+def config_path() -> Path:
+    """优先使用 flet 移动端数据目录，其次用户主目录，最后当前目录。"""
+    for var in ("FLET_APP_STORAGE_DATA", "FLET_APP_TEMP"):
+        p = os.environ.get(var)
+        if p:
+            return Path(p) / "config.json"
+    try:
+        return Path.home() / ".flet_ws_demo" / "config.json"
+    except Exception:
+        return Path.cwd() / "config.json"
+
+
+def load_config() -> dict:
+    cfg = {
+        "url": DEFAULT_URL,
+        "topics": ["demo"],
+        "templates": dict(DEFAULT_TEMPLATES),
+        "auto_subscribe": True,
+        "auto_reconnect": True,
+    }
+    try:
+        p = config_path()
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            for k in ("url", "topics", "templates", "auto_subscribe", "auto_reconnect"):
+                if k in data:
+                    cfg[k] = data[k]
+            for k, v in DEFAULT_TEMPLATES.items():
+                cfg["templates"].setdefault(k, v)
+    except Exception:
+        pass
+    return cfg
+
+
+def render_frame(tpl: str, topic: str, message: str = None) -> str:
+    """用简单替换渲染模板，避免 str.format 与 JSON 花括号冲突。"""
+    s = tpl.replace("{topic}", topic)
+    if message is not None:
+        s = s.replace("{message}", message)
+    return s
 
 
 def to_ws_url(url: str) -> str:
@@ -33,9 +91,16 @@ def to_ws_url(url: str) -> str:
     return url
 
 
+def now_str() -> str:
+    return time.strftime("%H:%M:%S")
+
+
 def main(page: ft.Page):
-    page.title = "Flet WebSocket 订阅/发布 Demo"
-    page.padding = 30
+    cfg = load_config()
+    cfg_lock = threading.Lock()
+
+    page.title = "Flet WebSocket 订阅/发布 调试工具"
+    page.padding = 24
     page.vertical_alignment = ft.MainAxisAlignment.START
     page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
     page.bgcolor = BG_COLORS[0]
@@ -43,13 +108,7 @@ def main(page: ft.Page):
 
     # ---------- 计数 & 换色 ----------
     count = 0
-
-    count_text = ft.Text("0", size=60, weight=ft.FontWeight.BOLD)
-    hint_text = ft.Text(
-        "点击按钮：计数 +1，同时切换页面背景色",
-        size=14,
-        color=ft.Colors.GREY_700,
-    )
+    count_text = ft.Text("0", size=54, weight=ft.FontWeight.BOLD)
 
     def on_click(e):
         nonlocal count
@@ -60,82 +119,149 @@ def main(page: ft.Page):
 
     counter_section = ft.Column(
         [
-            hint_text,
+            ft.Text("点击按钮：计数 +1，同时切换页面背景色", size=13, color=ft.Colors.GREY_700),
             count_text,
             ft.Button("点击我 +1", on_click=on_click),
         ],
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-        spacing=15,
+        spacing=10,
     )
 
-    # ---------- WebSocket 订阅/发布 ----------
-    ws_app = None  # websocket.WebSocketApp 实例
+    # ---------------- WebSocket 调试区 ----------------
 
-    url_field = ft.TextField(value=DEFAULT_WS_URL, width=380, label="服务地址", text_size=13)
-    topic_field = ft.TextField(value="demo", width=380, label="主题 topic", text_size=13)
-    msg_field = ft.TextField(width=380, label="要发布的消息内容", text_size=13)
+    # ---- 连接状态 ----
+    state = {
+        "ws": None,              # WebSocketApp 实例
+        "url": "",               # 当前连接的地址
+        "user_close": False,     # 是否用户主动断开
+        "pending_open": False,   # 是否正在等待 on_open（看门狗用）
+        "watchdog": None,        # 连接超时看门狗 Timer
+        "reconnect_delay": RECONNECT_MIN_SEC,
+        "reconnect_timer": None,
+    }
+    subscribed = set()           # 客户端认为已订阅的主题
 
+    url_field = ft.TextField(value=cfg["url"], width=380, label="服务地址", text_size=13)
     conn_status = ft.Text("未连接", size=14, weight=ft.FontWeight.BOLD, color=ft.Colors.GREY_700)
+    auto_reconnect_sw = ft.Switch(label="自动重连", value=cfg["auto_reconnect"], scale=0.85)
+    auto_subscribe_sw = ft.Switch(label="连接后自动重订所有主题", value=cfg["auto_subscribe"], scale=0.85)
 
-    # 收到的消息列表：新消息到达自动追加并滚动到底部
-    msg_list = ft.ListView(
-        expand=False,
-        height=260,
-        spacing=6,
-        auto_scroll=True,
-        padding=10,
-    )
+    # ---- 消息缓存与过滤 ----
+    msg_cache = []          # [{"time","topic","line","color"}]
+    current_filter = ""     # ""=全部
+
+    msg_list = ft.ListView(height=300, spacing=5, auto_scroll=True, padding=10)
     msg_panel = ft.Container(
         content=msg_list,
-        width=380,
+        width=420,
         border=ft.Border.all(1, ft.Colors.GREY_400),
         border_radius=8,
         bgcolor=ft.Colors.with_opacity(0.5, ft.Colors.WHITE),
     )
+    filter_dd = ft.Dropdown(
+        label="按主题过滤消息",
+        width=200,
+        text_size=13,
+        options=[ft.dropdown.Option("全部")],
+        value="全部",
+        on_change=lambda e: apply_filter(e.control.value),
+    )
 
-    def append_msg(line: str, color=None, bold=False):
-        """追加一条消息并自动刷新到界面（线程安全：flet 支持线程内 update）。"""
-        msg_list.controls.append(
-            ft.Text(line, size=13, selectable=True, color=color, weight=ft.FontWeight.BOLD if bold else None)
-        )
-        if len(msg_list.controls) > MAX_MESSAGES:
-            msg_list.controls = msg_list.controls[-MAX_MESSAGES:]
+    def apply_filter(value):
+        nonlocal current_filter
+        current_filter = "" if value in (None, "", "全部") else value
+        render_messages()
+
+    def refresh_filter_options():
+        topics = sorted({m["topic"] for m in msg_cache if m.get("topic")} | set(cfg["topics"]))
+        filter_dd.options = [ft.dropdown.Option("全部")] + [ft.dropdown.Option(t) for t in topics]
+        if current_filter and current_filter not in topics:
+            current_filter = ""
+            filter_dd.value = "全部"
+
+    def render_messages():
+        msg_list.controls = [
+            ft.Text(
+                '[%s] %s' % (m["time"], m["line"]),
+                size=12.5,
+                selectable=True,
+                color=m["color"],
+            )
+            for m in msg_cache
+            if current_filter == "" or m.get("topic") == current_filter
+        ]
         page.update()
+
+    def append_msg(line: str, color=None, topic=None):
+        """追加消息（ws 线程安全），仅当通过过滤器时刷新到界面。"""
+        msg_cache.append({"time": now_str(), "topic": topic, "line": line, "color": color})
+        if len(msg_cache) > MAX_MESSAGES:
+            del msg_cache[: len(msg_cache) - MAX_MESSAGES]
+        refresh_filter_options()
+        if current_filter == "" or topic == current_filter:
+            m = msg_cache[-1]
+            msg_list.controls.append(
+                ft.Text('[%s] %s' % (m["time"], m["line"]), size=12.5, selectable=True, color=m["color"])
+            )
+            page.update()
 
     def set_status(text: str, color=None):
         conn_status.value = text
         conn_status.color = color
         page.update()
 
-    def send_frame(obj: dict) -> bool:
-        if ws_app is None:
+    def save_config(e=None):
+        with cfg_lock:
+            try:
+                cfg["url"] = url_field.value
+                cfg["auto_subscribe"] = auto_subscribe_sw.value
+                cfg["auto_reconnect"] = auto_reconnect_sw.value
+                for k, f in tpl_fields.items():
+                    cfg["templates"][k] = f.value or DEFAULT_TEMPLATES[k]
+                p = config_path()
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception as err:
+                append_msg(f"配置保存失败：{err}", ft.Colors.RED_700)
+
+    # ---- 发送帧（模板渲染） ----
+    def send_frame(kind: str, topic: str, message: str = None) -> bool:
+        ws = state["ws"]
+        if ws is None:
             set_status("未连接，请先连接服务器", ft.Colors.RED_700)
             return False
+        frame = render_frame(cfg["templates"][kind], topic, message)
         try:
-            ws_app.send(json.dumps(obj, ensure_ascii=False))
+            ws.send(frame)
+            append_msg(f"→ {frame}", ft.Colors.PURPLE_700,
+                       topic=topic if kind == "publish" else None)
             return True
         except Exception as err:
             append_msg(f"发送失败：{err}", ft.Colors.RED_700)
             return False
 
-    # ---- WebSocketApp 回调（运行在 ws 接收线程中） ----
+    # ---- WebSocketApp 回调（运行在 ws 接收线程） ----
 
     def on_open(ws):
+        state["pending_open"] = False
+        state["reconnect_delay"] = RECONNECT_MIN_SEC
         set_status("已连接", ft.Colors.GREEN_700)
-        append_msg("已连接服务器", ft.Colors.GREEN_700, bold=True)
-        # 连接后自动订阅当前主题
-        t = (topic_field.value or "").strip()
-        if t:
-            if send_frame({"action": "subscribe", "topic": t}):
-                append_msg(f'→ 已发送订阅：{{"action":"subscribe","topic":"{t}"}}')
+        append_msg(f"已连接 {state['url']}", ft.Colors.GREEN_700, bold=True)
+        subscribed.clear()
+        if auto_subscribe_sw.value:
+            for t in list(cfg["topics"]):
+                if send_frame("subscribe", t):
+                    subscribed.add(t)
+        render_topics()
 
     def on_message(ws, raw):
-        # 尝试解析 JSON 并结构化展示，失败则原样显示
+        # 结构化解析优先：{"topic": "...", "message"/"data": ...}
         try:
             data = json.loads(raw)
             if isinstance(data, dict) and "topic" in data:
+                topic = str(data.get("topic"))
                 body = data.get("message", data.get("data", raw))
-                append_msg(f'[{data.get("topic")}] {body}')
+                append_msg(f"[{topic}] {body}", topic=topic)
                 return
         except Exception:
             pass
@@ -145,93 +271,327 @@ def main(page: ft.Page):
         append_msg(f"连接错误：{err}", ft.Colors.RED_700)
 
     def on_close(ws, code, reason):
-        set_status(f"已断开（code={code}）", ft.Colors.GREY_700)
-        append_msg(f"连接已关闭（code={code}）", ft.Colors.GREY_700)
+        state["ws"] = None
+        state["pending_open"] = False
+        subscribed.clear()
+        render_topics()
+        if state["user_close"]:
+            set_status("已主动断开", ft.Colors.GREY_700)
+            append_msg(f"已主动断开（code={code}）", ft.Colors.GREY_700)
+        else:
+            set_status("连接异常断开", ft.Colors.RED_700)
+            append_msg(f"连接异常断开（code={code}），将自动重连", ft.Colors.RED_700)
+            schedule_reconnect()
 
-    def on_connect(e):
-        nonlocal ws_app
-        if ws_app is not None:
+    def schedule_reconnect():
+        """异常断线后按指数退避自动重连。"""
+        if not auto_reconnect_sw.value or state["user_close"]:
+            return
+        delay = state["reconnect_delay"]
+        state["reconnect_delay"] = min(delay * 2, RECONNECT_MAX_SEC)
+        append_msg(f"{delay}s 后自动重连 {state['url']} …", ft.Colors.AMBER_800)
+        t = threading.Timer(delay, do_connect)
+        t.daemon = True
+        state["reconnect_timer"] = t
+        t.start()
+
+    def cancel_watchdog():
+        wd = state["watchdog"]
+        if wd is not None:
+            wd.cancel()
+            state["watchdog"] = None
+
+    def do_connect(e=None):
+        """发起连接：断开旧连接 → 打开新 WebSocketApp → 启动超时看门狗。"""
+        state["user_close"] = False
+        url = to_ws_url(url_field.value)
+        if not url:
+            set_status("请先填写服务地址", ft.Colors.RED_700)
+            return
+        rt = state["reconnect_timer"]
+        if rt is not None:
+            rt.cancel()
+            state["reconnect_timer"] = None
+        old = state["ws"]
+        if old is not None:
+            state["user_close"] = True
             try:
-                ws_app.close()
+                old.close()
             except Exception:
                 pass
-            ws_app = None
-        url = to_ws_url(url_field.value)
+            state["ws"] = None
+        state["url"] = url
         url_field.value = url
         set_status("连接中…", ft.Colors.AMBER_800)
         page.update()
-        ws_app = websocket.WebSocketApp(
+        ws = websocket.WebSocketApp(
             url,
             on_open=on_open,
             on_message=on_message,
             on_error=on_error,
             on_close=on_close,
         )
-        threading.Thread(target=ws_app.run_forever, daemon=True, name="ws-reader").start()
+        state["ws"] = ws
+        state["pending_open"] = True
+        threading.Thread(
+            target=ws.run_forever,
+            kwargs={"ping_interval": 20, "ping_timeout": 10},
+            daemon=True,
+            name="ws-reader",
+        ).start()
 
-    def on_disconnect(e):
-        if ws_app is not None:
+        # 看门狗：超时未完成握手则强制关闭，交给 on_close 重连逻辑
+        def watchdog():
+            if state["pending_open"]:
+                append_msg(f"连接超时（>{CONNECT_TIMEOUT_SEC}s），尝试中断", ft.Colors.RED_700)
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+
+        wd = threading.Timer(CONNECT_TIMEOUT_SEC, watchdog)
+        wd.daemon = True
+        state["watchdog"] = wd
+        wd.start()
+
+    def on_disconnect(e=None):
+        state["user_close"] = True
+        cancel_watchdog()
+        ws = state["ws"]
+        if ws is not None:
             try:
-                ws_app.close()
+                ws.close()
             except Exception:
                 pass
 
-    def on_subscribe(e):
-        t = (topic_field.value or "").strip()
-        if not t:
-            append_msg("请先填写主题 topic", ft.Colors.RED_700)
-            return
-        if send_frame({"action": "subscribe", "topic": t}):
-            append_msg(f'→ 订阅主题 "{t}"（已发送）', ft.Colors.BLUE_700)
+    atexit.register(on_disconnect)
 
-    def on_unsubscribe(e):
-        t = (topic_field.value or "").strip()
-        if not t:
-            append_msg("请先填写主题 topic", ft.Colors.RED_700)
-            return
-        if send_frame({"action": "unsubscribe", "topic": t}):
-            append_msg(f'→ 取消订阅主题 "{t}"（已发送）', ft.Colors.BLUE_700)
+    # ---- 主题管理（列表化） ----
+    pub_topic_dd = ft.Dropdown(label="发布目标主题", width=180, text_size=13)
+    new_topic_field = ft.TextField(label="新主题", width=220, text_size=13)
+    topics_column = ft.Column(spacing=4)
 
-    def on_publish(e):
-        t = (topic_field.value or "").strip()
+    def render_topics():
+        rows = []
+        for t in list(cfg["topics"]):
+            is_sub = t in subscribed
+            rows.append(
+                ft.Row(
+                    [
+                        ft.Container(
+                            ft.Text(t, size=13, weight=ft.FontWeight.BOLD),
+                            width=150 if len(t) < 18 else 260,
+                            overflow=ft.TextOverflow.ELLIPSIS,
+                        ),
+                        ft.Container(
+                            ft.Text(
+                                "已订阅" if is_sub else "未订阅",
+                                size=11,
+                                color=ft.Colors.GREEN_700 if is_sub else ft.Colors.GREY_600,
+                            ),
+                            width=52,
+                        ),
+                        ft.TextButton(
+                            "退订" if is_sub else "订阅",
+                            on_click=lambda e, tt=t, s=is_sub: toggle_topic(tt, s),
+                        ),
+                        ft.IconButton(
+                            ft.Icons.DELETE_OUTLINE,
+                            icon_size=18,
+                            tooltip="删除主题",
+                            on_click=lambda e, tt=t: delete_topic(tt),
+                        ),
+                    ],
+                    spacing=6,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                )
+            )
+        topics_column.controls = rows
+        pub_topic_dd.options = [ft.dropdown.Option(t) for t in cfg["topics"]]
+        pub_topic_dd.value = cfg["topics"][0] if cfg["topics"] else None
+        page.update()
+
+    def add_topic(e=None):
+        t = (new_topic_field.value or "").strip()
+        if not t:
+            return
+        if t not in cfg["topics"]:
+            cfg["topics"].append(t)
+            save_config()
+        new_topic_field.value = ""
+        render_topics()
+        # 已连接时动态添加立即生效
+        if state["ws"] is not None:
+            if send_frame("subscribe", t):
+                subscribed.add(t)
+                render_topics()
+
+    def toggle_topic(t, is_sub):
+        if is_sub:
+            if send_frame("unsubscribe", t):
+                subscribed.discard(t)
+        else:
+            if send_frame("subscribe", t):
+                subscribed.add(t)
+        render_topics()
+
+    def delete_topic(t):
+        if t in subscribed:
+            send_frame("unsubscribe", t)
+            subscribed.discard(t)
+        if t in cfg["topics"]:
+            cfg["topics"].remove(t)
+            save_config()
+        render_topics()
+
+    def subscribe_all(e=None):
+        ok = 0
+        for t in list(cfg["topics"]):
+            if send_frame("subscribe", t):
+                subscribed.add(t)
+                ok += 1
+        append_msg(f"批量订阅完成：{ok}/{len(cfg['topics'])}", ft.Colors.BLUE_700)
+        render_topics()
+
+    def unsubscribe_all(e=None):
+        for t in list(subscribed):
+            send_frame("unsubscribe", t)
+        subscribed.clear()
+        append_msg("已退订全部主题", ft.Colors.BLUE_700)
+        render_topics()
+
+    # ---- 发布 ----
+    def on_publish(e=None):
+        t = pub_topic_dd.value
         text = msg_field.value or ""
-        if not t or not text:
-            append_msg("发布需要填写主题和消息内容", ft.Colors.RED_700)
+        if not t:
+            append_msg("请选择发布目标主题", ft.Colors.RED_700)
             return
-        if send_frame({"action": "publish", "topic": t, "message": text}):
-            append_msg(f'→ 已发布到 "{t}"：{text}', ft.Colors.PURPLE_700)
+        if not text:
+            append_msg("请填写消息内容", ft.Colors.RED_700)
+            return
+        send_frame("publish", t, text)
 
-    ws_section = ft.Column(
+    msg_field = ft.TextField(
+        label="要发布的消息内容", width=240, text_size=13, on_submit=on_publish
+    )
+
+    # ---- 协议模板编辑 ----
+    tpl_fields = {
+        k: ft.TextField(
+            value=cfg["templates"][k],
+            width=420,
+            text_size=12,
+            label={"subscribe": "订阅帧模板", "unsubscribe": "退订帧模板", "publish": "发布帧模板"}[k],
+            on_blur=save_config,
+        )
+        for k in ("subscribe", "unsubscribe", "publish")
+    }
+
+    tpl_tile = ft.ExpansionTile(
+        title=ft.Text("协议模板（{topic} / {message} 占位符，适配任意服务端）", size=13),
+        initially_expanded=False,
+        controls=[
+            ft.Container(
+                ft.Column(
+                    list(tpl_fields.values()),
+                    spacing=8,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                width=440,
+            )
+        ],
+    )
+
+    # ---- 布局 ----
+    conn_section = ft.Column(
         [
-            ft.Text("WebSocket 订阅 / 发布", size=18, weight=ft.FontWeight.BOLD),
-            url_field,
             ft.Row(
-                [ft.Button("连接", on_click=on_connect), ft.Button("断开", on_click=on_disconnect)],
+                [
+                    ft.Button("连接", on_click=do_connect),
+                    ft.Button("断开", on_click=on_disconnect),
+                    auto_reconnect_sw,
+                ],
                 alignment=ft.MainAxisAlignment.CENTER,
-                spacing=15,
+                spacing=12,
             ),
             conn_status,
-            topic_field,
+            ft.Container(auto_subscribe_sw, alignment=ft.alignment.center),
+        ],
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        spacing=8,
+    )
+
+    topics_section = ft.Column(
+        [
+            ft.Text("主题管理", size=16, weight=ft.FontWeight.BOLD),
             ft.Row(
-                [ft.Button("订阅", on_click=on_subscribe), ft.Button("取消订阅", on_click=on_unsubscribe)],
+                [new_topic_field, ft.Button("添加", on_click=add_topic)],
                 alignment=ft.MainAxisAlignment.CENTER,
-                spacing=15,
+                spacing=8,
             ),
-            msg_field,
-            ft.Button("发布到主题", on_click=on_publish),
+            ft.Container(
+                content=topics_column,
+                width=420,
+                border=ft.Border.all(1, ft.Colors.GREY_300),
+                border_radius=8,
+                padding=8,
+            ),
+            ft.Row(
+                [ft.Button("全部订阅", on_click=subscribe_all), ft.Button("全部退订", on_click=unsubscribe_all)],
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=10,
+            ),
+        ],
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        spacing=8,
+    )
+
+    pub_section = ft.Column(
+        [
+            ft.Text("发布消息", size=16, weight=ft.FontWeight.BOLD),
+            ft.Row(
+                [pub_topic_dd, msg_field, ft.Button("发布", on_click=on_publish)],
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=8,
+            ),
+        ],
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        spacing=8,
+    )
+
+    log_section = ft.Column(
+        [
+            ft.Text("消息日志", size=16, weight=ft.FontWeight.BOLD),
+            ft.Row(
+                [filter_dd, ft.Button("清空日志", on_click=lambda e: (msg_cache.clear(), refresh_filter_options(), render_messages()))],
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=10,
+            ),
             msg_panel,
         ],
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-        spacing=12,
+        spacing=8,
     )
 
     page.add(
         counter_section,
         ft.Divider(),
-        ws_section,
+        conn_section,
+        url_field,
+        tpl_tile,
+        ft.Divider(),
+        topics_section,
+        ft.Divider(),
+        pub_section,
+        ft.Divider(),
+        log_section,
     )
+
+    render_topics()
+    append_msg("就绪。先修改地址/协议模板，点击“连接”。", ft.Colors.GREY_700)
 
 
 # 打包为 APK 时由 flet 运行时加载 main 模块并调用 main(page)；
 # 浏览器/桌面模式下 ft.run 直接启动。view 参数在移动端会被忽略。
-ft.run(main)
+ft.run(main, view=ft.AppView.WEB_BROWSER)
