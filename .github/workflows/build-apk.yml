@@ -17,16 +17,32 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install flet CLI
-        run: pip install flet==0.86.5
+      - name: Install flet CLI and notifications package
+        run: pip install flet==0.86.5 flet-android-notifications==0.10.1
 
-      # flet build 自动安装所需版本的 Flutter SDK / JDK / Android SDK（--yes）
-      - name: Build APK
-        run: flet build apk --yes --verbose
+      # 第一遍构建：生成 build/flutter 脚手架与 build/site-packages。
+      # 未打补丁时 flutter_local_notifications 要求 desugaring，gradle 编译失败属预期。
+      - name: Build APK (scaffold pass, gradle failure expected)
+        run: |
+          flet build apk --yes --verbose \
+            || echo "::warning::scaffold pass ended early (expected: gradle needs desugaring patch)"
+
+      # 打补丁：注入 flutter_local_notifications 的 receiver/service + 启用 desugaring/multidex
+      - name: Patch Android project for notifications
+        run: flet-android-notifications-patch --project-root build/flutter
+
+      # 第二遍构建：直接用 flutter 编译已打补丁的工程（flet build 会重新生成配置、抹掉补丁）
+      - name: Build APK (patched, direct flutter build)
+        working-directory: build/flutter
+        run: |
+          FLUTTER_BIN="$(ls -d /home/runner/flutter/*/bin/flutter | sort -V | tail -1)"
+          echo "Using Flutter: $FLUTTER_BIN"
+          export SERIOUS_PYTHON_SITE_PACKAGES="$GITHUB_WORKSPACE/build/site-packages"
+          "$FLUTTER_BIN" build apk --release
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: FletDemo-apk
-          path: build/**/*.apk
+          path: build/flutter/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error

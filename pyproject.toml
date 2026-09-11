@@ -1,8 +1,8 @@
 [project]
 name = "flet-click-demo"
-version = "2.0.0"
-description = "Flet 点击计数换色 + WebSocket 订阅/发布 Demo"
-dependencies = ["flet==0.86.5", "websocket-client>=1.6.0", "certifi"]
+version = "2.1.0"
+description = "Flet 通知示例：Android 系统级通知（flet-android-notifications）+ 浏览器 SnackBar 回退"
+dependencies = ["flet==0.86.5", "websocket-client>=1.6.0", "certifi", "flet-android-notifications==0.10.1"]
 
 [tool.flet]
 org = "com.example"
@@ -10,4 +10,7 @@ product = "FletDemo"
 
 [tool.flet.app]
 path = "app"
-module = "main"
+module = "notiflydeam"
+
+[tool.flet.android.permission]
+"android.permission.POST_NOTIFICATIONS" = true

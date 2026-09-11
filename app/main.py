@@ -18,7 +18,7 @@ mimetypes.add_type("text/javascript", ".mjs")
 mimetypes.add_type("application/wasm", ".wasm")
 
 # 默认服务地址（可在界面修改，保存后持久化）
-DEFAULT_URL = "ws://192.168.2.101:12347/ws"
+DEFAULT_URL = "ws://17.tcp.cpolar.top:10180/ws"
 
 # 协议模板：{topic}/{message} 占位符，适配任意服务端协议（MQTT/STOMP/自定义）
 DEFAULT_TEMPLATES = {
@@ -638,4 +638,5 @@ _patch_web_font_fallback()
 # 打包为 APK 时由 flet 运行时加载 main 模块并调用 main(page)；
 # 浏览器/桌面模式下 ft.run 直接启动。view/web_renderer/no_cdn 参数在移动端会被忽略。
 # web_renderer 用 CANVAS_KIT：skwasm 渲染器会直连 gstatic.com 拉取资源（国内被墙导致页面卡死）
+#ft.run(main)
 ft.run(main, view=ft.AppView.WEB_BROWSER, web_renderer=ft.WebRenderer.CANVAS_KIT, no_cdn=True)
